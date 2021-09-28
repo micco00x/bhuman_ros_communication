@@ -15,12 +15,27 @@
 #include <ros/ros.h>
 
 // Argos
+#include <argos_msgs/FootstepPlan.h>
+#include <argos_planning/ArgosRosConverter.hpp>
 #include <argos_planning/DoubleSupportConfiguration.hpp>
 #include <argos_planning/FootstepPlan.hpp>
 #include <argos_planning/enum.hpp>
 
 class TCPWrapper {
  public:
+  TCPWrapper(ros::NodeHandle& nodeHandle) {
+    nodeHandle.param(
+        "footstep_plan_topic",
+        footstep_plan_topic_, 
+        std::string("/argos_planning/footstep_plan")
+    );
+
+    footstepPlanSubscriber_ = nodeHandle.subscribe(
+        footstep_plan_topic_, 1,
+        &TCPWrapper::footstepPlanCallback, this
+    );
+  }
+
   ~TCPWrapper() {
     // Close sockets:
     close(cli_sockfd_);
@@ -111,8 +126,23 @@ class TCPWrapper {
     );
   }
 
+  void footstepPlanCallback(
+      const argos_msgs::FootstepPlan& footstepPlanMessage) {
+    argos::FootstepPlan footstepPlan;
+    argos::ArgosRosConverter::fromMessage(footstepPlanMessage, footstepPlan);
+
+    ROS_INFO("Sending footstep plan...");
+    if (!send_footstep_plan(footstepPlan)) {
+      ROS_ERROR("Cannot send footstep plan.");
+    }
+  }
+
   int sockfd_; // server socket file descriptor
   int cli_sockfd_; // socket file descriptor related to connection with client
+
+  std::string footstep_plan_topic_;
+
+  ros::Subscriber footstepPlanSubscriber_;
 }; // end class TCPWrapper
 
 
@@ -121,7 +151,7 @@ int main(int argc, char** argv) {
   ros::init(argc, argv, "bhuman_ros_communication");
   ros::NodeHandle nodeHandle("~");
 
-  TCPWrapper tcp_wrapper;
+  TCPWrapper tcp_wrapper(nodeHandle);
 
   ROS_INFO("bhuman_ros_communication node started.");
 
@@ -146,44 +176,7 @@ int main(int argc, char** argv) {
 
   ROS_INFO("Connection established.");
 
-  argos::FootstepPlan footstepPlan;
-  footstepPlan.setFrameId("odom");
-  footstepPlan.setTimestamp(ros::Time::now().toSec());
-  footstepPlan.push_back(argos::DoubleSupportConfiguration(
-      Eigen::Vector4d(0.0,  0.05, 0.0, 0.0),
-      Eigen::Vector4d(0.0, -0.05, 0.0, 0.0),
-      argos::Foot::RIGHT,
-      0.0
-  ));
-  footstepPlan.push_back(argos::DoubleSupportConfiguration(
-      Eigen::Vector4d(0.1,  0.05, 0.0, 0.0),
-      Eigen::Vector4d(0.0, -0.05, 0.0, 0.0),
-      argos::Foot::LEFT,
-      0.025
-  ));
-  footstepPlan.push_back(argos::DoubleSupportConfiguration(
-      Eigen::Vector4d(0.1,  0.05, 0.0, 0.0),
-      Eigen::Vector4d(0.2, -0.05, 0.0, 0.0),
-      argos::Foot::RIGHT,
-      0.025
-  ));
-  footstepPlan.push_back(argos::DoubleSupportConfiguration(
-      Eigen::Vector4d(0.3,  0.05, 0.0, 0.0),
-      Eigen::Vector4d(0.2, -0.05, 0.0, 0.0),
-      argos::Foot::LEFT,
-      0.025
-  ));
-  footstepPlan.push_back(argos::DoubleSupportConfiguration(
-      Eigen::Vector4d(0.3,  0.05, 0.0, 0.0),
-      Eigen::Vector4d(0.3, -0.05, 0.0, 0.0),
-      argos::Foot::RIGHT,
-      0.025
-  ));
-
-  ROS_INFO("Sending footstep plan...");
-  if (!tcp_wrapper.send_footstep_plan(footstepPlan)) {
-    ROS_ERROR("Cannot send footstep plan.");
-  }
+  ros::spin();
 
   return 0;
 }
