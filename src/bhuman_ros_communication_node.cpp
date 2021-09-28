@@ -26,24 +26,11 @@ void fill_buffer(const argos::FootstepPlan& footstepPlan, char* buffer) {
     const auto& qR = configuration.getqR();
     argos::Foot support_foot = configuration.getSupportFoot();
     double h_z = configuration.getSwingFootTrajectoryHeight();
-    // Copy qL to buffer:
-    std::memcpy(buffer_ptr, &qL.x(), sizeof(qL.x()));
-    buffer_ptr += sizeof(qL.x());
-    std::memcpy(buffer_ptr, &qL.y(), sizeof(qL.y()));
-    buffer_ptr += sizeof(qL.y());
-    std::memcpy(buffer_ptr, &qL.z(), sizeof(qL.z()));
-    buffer_ptr += sizeof(qL.z());
-    std::memcpy(buffer_ptr, &qL.w(), sizeof(qL.w()));
-    buffer_ptr += sizeof(qL.w());
-    // Copy qR to buffer:
-    std::memcpy(buffer_ptr, &qR.x(), sizeof(qR.x()));
-    buffer_ptr += sizeof(qR.x());
-    std::memcpy(buffer_ptr, &qR.y(), sizeof(qR.y()));
-    buffer_ptr += sizeof(qR.y());
-    std::memcpy(buffer_ptr, &qR.z(), sizeof(qR.z()));
-    buffer_ptr += sizeof(qR.z());
-    std::memcpy(buffer_ptr, &qR.w(), sizeof(qR.w()));
-    buffer_ptr += sizeof(qR.w());
+    double q[8] = {qL.x(), qL.y(), qL.z(), qL.w(),
+                   qR.x(), qR.y(), qR.z(), qR.w()};
+    // Copy q to buffer:
+    std::memcpy(buffer_ptr, q, sizeof(q));
+    buffer_ptr += sizeof(q);
     // Copy support foot to buffer:
     std::memcpy(buffer_ptr, &support_foot, sizeof(support_foot));
     buffer_ptr += sizeof(support_foot);
@@ -53,24 +40,25 @@ void fill_buffer(const argos::FootstepPlan& footstepPlan, char* buffer) {
   }
 }
 
-ssize_t send_buffer_size(
-    int server_socket_descriptor,
-    uint32_t buffer_size) {
+ssize_t send_plan_size(
+    int client_socket_descriptor,
+    uint32_t plan_size) {
   return send(
-      server_socket_descriptor,
-      &buffer_size,
-      sizeof(buffer_size),
+      client_socket_descriptor,
+      &plan_size,
+      sizeof(plan_size),
       0
   );
 }
 
 ssize_t send_buffer(
-  int server_socket_descriptor,
-  char* buffer) {
+  int client_socket_descriptor,
+  char* buffer,
+  size_t buffer_size) {
   return send(
-      server_socket_descriptor,
+      client_socket_descriptor,
       buffer,
-      sizeof(buffer),
+      buffer_size,
       0
   );
 }
@@ -80,6 +68,41 @@ int main(int argc, char** argv) {
   ros::NodeHandle nodeHandle("~");
 
   ROS_INFO("bhuman_ros_communication node started.");
+
+  const in_port_t PORT = 1999;
+
+  int sockfd; // server socket file descriptor
+  int cli_sockfd; // socket file descriptor related to connection with client
+  struct sockaddr_in serv_addr, cli_addr;
+
+  // Open server socket:
+  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+    perror("Cannot open socket.");
+    exit(0);
+  }
+
+  // Setup server address structure:
+  serv_addr.sin_family = AF_INET;
+  serv_addr.sin_port = PORT;
+  serv_addr.sin_addr.s_addr = INADDR_ANY;
+
+  // Bind socket to specified address and port:
+  if (bind(sockfd, (struct sockaddr*) &serv_addr, sizeof(serv_addr)) == -1) {
+    perror("Cannot bind to specified address and port.");
+    exit(0);
+  }
+
+  // Listen to incoming connections:
+  listen(sockfd, 1);
+
+  // Wait for a connection:
+  ROS_INFO("Waiting for a connection...");
+  socklen_t clilen = sizeof(cli_addr);
+  if ((cli_sockfd = accept(sockfd, (struct sockaddr*) &cli_addr, (socklen_t*) &clilen)) == -1) {
+    perror("Cannot accept connection.");
+  }
+
+  ROS_INFO("Connection established.");
 
   argos::FootstepPlan footstepPlan;
   footstepPlan.setFrameId("odom");
@@ -116,11 +139,18 @@ int main(int argc, char** argv) {
   ));
 
   size_t configuration_size = sizeof(double) * 9 + sizeof(argos::Foot);
-  std::unique_ptr<char[]> footstep_plan_buffer(
-      new char [configuration_size * footstepPlan.size()]
-  );
+  size_t buffer_size = configuration_size * footstepPlan.size();
+  std::unique_ptr<char[]> footstep_plan_buffer(new char [buffer_size]);
 
-  fill_buffer(footstepPlan, footstep_plan_buffer.get());
+  ROS_INFO("Sending footstep plan...");
+  fill_buffer(footstepPlan, &footstep_plan_buffer[0]);
+
+  send_plan_size(cli_sockfd, footstepPlan.size());
+  send_buffer(cli_sockfd, &footstep_plan_buffer[0], buffer_size);
+
+  // Close sockets:
+  close(cli_sockfd);
+  close(sockfd);
 
   return 0;
 }
