@@ -1,5 +1,6 @@
 // STL
 #include <memory>
+#include <thread>
 
 // Socket
 #include <sys/socket.h>
@@ -10,11 +11,13 @@
 #include <netdb.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
 
 // ROS
 #include <ros/ros.h>
 
 // Argos
+#include <argos_msgs/DoubleSupportConfiguration.h>
 #include <argos_msgs/FootstepPlan.h>
 #include <argos_planning/ArgosRosConverter.hpp>
 #include <argos_planning/DoubleSupportConfiguration.hpp>
@@ -34,6 +37,11 @@ class TCPWrapper {
         footstep_plan_topic_, 1,
         &TCPWrapper::footstepPlanCallback, this
     );
+
+    configurationPublisher_ =
+        nodeHandle.advertise<argos_msgs::DoubleSupportConfiguration>(
+            "double_support_configuration", 1, true
+        );
   }
 
   ~TCPWrapper() {
@@ -63,7 +71,14 @@ class TCPWrapper {
     listen(sockfd_, 1);
 
     socklen_t clilen = sizeof(cli_addr);
-    return (cli_sockfd_ = accept(sockfd_, (struct sockaddr*) &cli_addr, (socklen_t*) &clilen)) != -1;
+    if ((cli_sockfd_ = accept(sockfd_, (struct sockaddr*) &cli_addr,
+        (socklen_t*) &clilen)) == -1) {
+      return false;
+    }
+
+    configuration_thread_ = std::thread(&TCPWrapper::configuration_poll, this);
+
+    return true;
   }
 
   bool send_footstep_plan(const argos::FootstepPlan& footstepPlan) {
@@ -137,12 +152,77 @@ class TCPWrapper {
     }
   }
 
+  void configuration_poll() {
+    struct pollfd pfds[1];
+    pfds[0].fd = cli_sockfd_;
+    pfds[0].events = POLLIN;
+
+    while (1) {
+      // Poll and receive footstep plan if POLLIN flag has been set:
+      if (poll(pfds, 1, -1) > 0) {
+        if (pfds[0].revents & POLLIN) {
+          if (!recvConfiguration()) {
+            break;
+          }
+        }
+      } else {
+        ROS_ERROR("Client disconnected.");
+        break;
+      }
+    }
+  }
+
+  bool recvConfiguration() {
+    // Check that client socket file descriptor is valid before receiving the
+    // double support configuration:
+    if (fcntl(cli_sockfd_, F_GETFD) == -1) {
+      ROS_ERROR("Invalid client file descriptor.");
+      return false;
+    }
+
+    // Read buffer:
+    const size_t configuration_size = 9 * sizeof(double) + sizeof(argos::Foot);
+    char buffer[configuration_size];
+    if (recv(cli_sockfd_, buffer, configuration_size, MSG_WAITALL) == -1) {
+      ROS_ERROR("Cannot receive configuration.");
+      return false;
+    }
+
+    Eigen::Vector4d qL, qR;
+    argos::Foot support_foot;
+    double h_z;
+
+    double q[8];
+    std::memcpy(q, buffer, sizeof(q));
+    std::memcpy(&support_foot, buffer + sizeof(q), sizeof(support_foot));
+    std::memcpy(&h_z, buffer + sizeof(q) + sizeof(support_foot), sizeof(h_z));
+    qL << q[0], q[1], q[2], q[3];
+    qR << q[4], q[5], q[6], q[7];
+
+    publishConfiguration(
+        argos::DoubleSupportConfiguration(qL, qR, support_foot, h_z)
+    );
+
+    return true;
+  }
+
+  void publishConfiguration(
+      const argos::DoubleSupportConfiguration& configuration) {
+    argos_msgs::DoubleSupportConfiguration message;
+    argos::ArgosRosConverter::toMessage(configuration, message);
+    configurationPublisher_.publish(message);
+  }
+
   int sockfd_; // server socket file descriptor
   int cli_sockfd_; // socket file descriptor related to connection with client
 
   std::string footstep_plan_topic_;
 
   ros::Subscriber footstepPlanSubscriber_;
+
+  ros::Publisher configurationPublisher_;
+
+  std::thread configuration_thread_;
 }; // end class TCPWrapper
 
 
